@@ -1,81 +1,30 @@
-import { pool } from './db.js'; // Import the pool directly
 import process from 'process';
 
 let totalPagesScraped = 0;
 let totalFailures = 0;
 let startTime = null;
 let sitehomepage = null; // Variable to store the base URL
+import { log } from 'crawlee';
 
-// Batch configuration
-const BATCH_SIZE = 100; // Number of rows to insert in a single batch
-let batch = []; // Array to hold rows for the current batch
-
-// Function to insert a batch of rows within a transaction
-const insertBatch = async (batch) => {
-    const client = await pool.connect(); // Acquire a client from the pool
-    try {
-        await client.query('BEGIN'); // Start a transaction
-
-        const insertQuery = `
-            INSERT INTO ${process.env.SCRAPE_TABLE_NAME} (
-                sitehomepage, article_url, title, bodyText, datePublished, 
-                articlecategories, tags, keywords, author, featuredImage, comments
-            )
-            VALUES ${batch.map((_, i) => `($${i * 11 + 1}, $${i * 11 + 2}, $${i * 11 + 3}, $${i * 11 + 4}, $${i * 11 + 5}, $${i * 11 + 6}, $${i * 11 + 7}, $${i * 11 + 8}, $${i * 11 + 9}, $${i * 11 + 10}, $${i * 11 + 11})`).join(', ')}
-            ON CONFLICT (article_url) DO UPDATE SET
-                sitehomepage = EXCLUDED.sitehomepage,
-                title = EXCLUDED.title,
-                bodyText = EXCLUDED.bodyText,
-                datePublished = EXCLUDED.datePublished,
-                articlecategories = EXCLUDED.articlecategories,
-                tags = EXCLUDED.tags,
-                keywords = EXCLUDED.keywords,
-                author = EXCLUDED.author,
-                featuredImage = EXCLUDED.featuredImage,
-                comments = EXCLUDED.comments;
-        `;
-        const values = batch.flat(); // Flatten the batch array into a single array of values
-
-        await client.query(insertQuery, values); // Execute the batch insert
-        await client.query('COMMIT'); // Commit the transaction
-
-        console.log(`Processed ${batch.length} rows (inserted or updated)`);
-    } catch (error) {
-        await client.query('ROLLBACK'); // Rollback the transaction on error
-        console.error('Error inserting/updating batch:', error);
-        throw error;
-    } finally {
-        client.release(); // Release the client back to the pool
-    }
-};
-
-export const requestHandler = async ({ request, page, log, pushData, enqueueLinks, maxResults }) => {
+export const requestHandler = async ({ request, page, requestsToResponses }) => {
     if (!startTime) {
         startTime = Date.now(); // Record the start time of the crawl
     }
 
+    const httpResponse = requestsToResponses.get(request.uniqueKey);
     // Set the base URL (sitehomepage) if it's not already set
     if (!sitehomepage) {
         sitehomepage = new URL(request.loadedUrl).origin; // Extract the base URL (e.g., https://example.com)
         log.info(`Base URL set to: ${sitehomepage}`);
-        console.log(`Base URL set to: ${sitehomepage}`);
-    }
-
-    // Check if we've reached max results for this website
-    if (maxResults !== null && totalPagesScraped >= maxResults) {
-        log.info(`Reached max results (${maxResults}) for ${sitehomepage}, skipping ${request.url}`);
-        return;
     }
 
     log.info(`Processing: ${request.url}`);
-    console.log(`Processing URL: ${request.url}`);
 
     try {
         await page.waitForLoadState('networkidle', { timeout: 15000 }); // Added 15 second timeout
 
         const title = await page.title();
         log.info(`Title: ${title}`);
-        console.log(`Page Title: ${title}`);
 
         // Scroll the page
         await page.evaluate(() => {
@@ -83,16 +32,26 @@ export const requestHandler = async ({ request, page, log, pushData, enqueueLink
         });
 
         // Extract body text
-        const bodyText = await page.evaluate(() => {
-            const clone = (document.querySelector('article') || document.body).cloneNode(true);
+        // const bodyText = await page.evaluate(() => {
+        //     const clone = (document.querySelector('article') || document.body).cloneNode(true);
+        //     // Remove unwanted elements
+        //     clone.querySelectorAll('img, figure, script, style, .ad, .caption').forEach(el => el.remove());
+        //     // Get clean text
+        //     return clone.textContent
+        //         .replace(/\s+/g, ' ')
+        //         .replace(/\b(Figure|Image)\s*\d*:?/gi, '')
+        //         .trim();
+        // });
+
+        // Extract body text
+        const bodyHtml = await page.evaluate(() => {
+            const clone = document.body.cloneNode(true);
             // Remove unwanted elements
-            clone.querySelectorAll('img, figure, script, style, .ad, .caption').forEach(el => el.remove());
-            // Get clean text
-            return clone.textContent
-                .replace(/\s+/g, ' ')
-                .replace(/\b(Figure|Image)\s*\d*:?/gi, '')
-                .trim();
+            clone.querySelectorAll('script, style, .ad').forEach(el => el.remove());
+            // Return the HTML string of the cleaned clone
+            return clone.outerHTML;
         });
+
 
         // Extract and standardize date published to ISO UTC
         const datePublished = await page.evaluate(() => {
@@ -140,13 +99,13 @@ export const requestHandler = async ({ request, page, log, pushData, enqueueLink
         // Extract author
         const author = await page.evaluate(() => {
             return document.querySelector('meta[name="author"]')?.content ||
-                   document.querySelector('.author-name, .author a')?.textContent.trim();
+                document.querySelector('.author-name, .author a')?.textContent.trim();
         });
 
         // Extract featured image
         const featuredImage = await page.evaluate(() => {
             return document.querySelector('meta[property="og:image"]')?.content ||
-                   document.querySelector('.featured-image img, .post-thumbnail img')?.src;
+                document.querySelector('.featured-image img, .post-thumbnail img')?.src;
         });
 
         // Extract comments
@@ -154,76 +113,48 @@ export const requestHandler = async ({ request, page, log, pushData, enqueueLink
             return Array.from(document.querySelectorAll('.comment-text, .comment-content')).map(el => el.textContent.trim());
         });
 
-        // Check if the article_url already exists in the batch
-        const isDuplicate = batch.some(row => row[1] === request.loadedUrl); // row[1] is article_url
-        if (isDuplicate) {
-            log.info(`Skipping duplicate URL in batch: ${request.loadedUrl}`);
-            console.log(`Skipping duplicate URL in batch: ${request.loadedUrl}`);
-        } else {
-            // Add data to the batch
-            batch.push([
-                sitehomepage, // sitehomepage (base URL of the website)
-                request.loadedUrl, // article_url (URL of the article)
-                title, // title (title of the article)
-                bodyText, // bodyText (body text of the article)
-                datePublished || null, // Convert empty/falsy values to NULL
-                articlecategories, // articlecategories (categories of the article)
-                tags, // tags (tags associated with the article)
-                keywords, // keywords (keywords associated with the article)
-                author, // author (author of the article)
-                featuredImage, // featuredImage (URL of the featured image)
-                JSON.stringify(comments), // comments (comments on the article)
-            ]);
 
-            // Insert batch if it reaches the batch size
-            if (batch.length >= BATCH_SIZE) {
-                await insertBatch(batch);
-                batch = []; // Reset the batch
-            }
-
-            // Increment the number of pages scraped
-            totalPagesScraped++;
+        const data = {
+            sitehomepage, // sitehomepage (base URL of the website)
+            url: request.loadedUrl, // article_url (URL of the article)
+            title, // title (title of the article)
+            bodyHtml, // bodyText (body text of the article)
+            datePublished, // Convert empty/falsy values to NULL
+            articlecategories, // articlecategories (categories of the article)
+            tags, // tags (tags associated with the article)
+            keywords, // keywords (keywords associated with the article)
+            author, // author (author of the article)
+            featuredImage, // featuredImage (URL of the featured image)
+            comments: JSON.stringify(comments), // comments (comments on the article)
         }
+
+        // Get the metrics
+        const metrics = getMetrics();
+        // Send the metrics as JSON response
+        httpResponse.json({
+            success: true,
+            message: 'Crawl completed successfully.',
+            data,
+            metrics,
+        });
+        // Increment the number of pages scraped
+        totalPagesScraped++;
+
 
     } catch (error) {
         log.error(`Error processing ${request.url}:`, error);
-        console.error(`Error processing ${request.url}:`, error);
-
+        httpResponse.status(500).json({
+            success: false,
+            message: 'Crawler failed. Check the server logs for details.',
+            error: error.message,
+        });
         // Increment the number of failures
         totalFailures++;
-    }
-
-    // Enqueue links
-    try {
-        const links = await enqueueLinks({
-            label: 'detail',
-            transformRequestFunction(req) {
-                // Define an array of file extensions to ignore
-                const ignoredExtensions = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'];
-
-                // Check if the URL ends with any of the ignored extensions
-                const shouldIgnore = ignoredExtensions.some(ext => req.url.toLowerCase().endsWith(ext));
-
-                // If the URL should be ignored, return false
-                if (shouldIgnore) return false;
-
-                // Otherwise, return the request
-                return req;
-            },
-        });
-        console.log(`Enqueued ${links.length} links from ${request.url}`);
-    } catch (error) {
-        console.error(`Error enqueueing links from ${request.url}:`, error);
+    } finally {
+        requestsToResponses.delete(request.uniqueKey);
     }
 };
 
-// Function to flush the remaining batch (if any) when the crawl ends
-export const flushBatch = async () => {
-    if (batch.length > 0) {
-        await insertBatch(batch);
-        batch = []; // Reset the batch
-    }
-};
 
 // Function to calculate average speed (pages per second)
 const calculateAverageSpeed = () => {

@@ -6,10 +6,10 @@
     "start": "node src/main.js"
   },
   "dependencies": {
-    "crawlee": "^3.0.0",
+    "crawlee": "^3.13.8",
     "pg": "^8.11.3",
-    "express": "^4.18.2",
-    "playwright": "^1.30.0",
-    "dotenv": "^16.0.0"
+    "express": "^5.1.0",
+    "playwright": "^1.53.1",
+    "dotenv": "^16.5.0"
   }
 }

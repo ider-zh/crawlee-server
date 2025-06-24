@@ -22,11 +22,10 @@ Starts a web crawling job for the specified URL.
 
 **Query Parameters:**
 - `url` (required) - The URL to start crawling from
-- `maxResults` (optional) - Maximum number of pages to scrape (default: no limit)
 
 **Example Request:**
 ```bash
-curl "http://localhost:3001/start-crawl?url=https://example.com&maxResults=10"
+curl "http://localhost:3001/start-crawl?url=https://example.com"
 ```
 make sure to update your servers IP & Port
 you can use variables for the website and max results
@@ -36,6 +35,7 @@ you can use variables for the website and max results
 {
   "success": true,
   "message": "Crawl completed successfully.",
+  "bodyHtml": "<html><body><h1>Example Domain</h1><p>This domain is for use in illustrative examples in documents. You may use this domain in literature without prior coordination or asking for permission.</p><p><a href=\"https://www.iana.org/domains/example\">More information...</a></p></body></html>",
   "metrics": {
     "totalPagesScraped": 10,
     "totalFailures": 0,

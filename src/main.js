@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import 'dotenv/config';
 import express from 'express';
-import { PlaywrightCrawler, Configuration } from 'crawlee';
-import { requestHandler, getMetrics, clearMetrics, flushBatch } from './routes.js';
+import { PlaywrightCrawler, Configuration, log } from 'crawlee';
+import { requestHandler, } from './routes.js';
 
 // Set memory limit from environment
 process.env.CRAWLEE_MEMORY_MBYTES = process.env.CRAWLEE_MEMORY_MBYTES || '2048';
@@ -11,6 +12,40 @@ Configuration.getGlobalConfig().set('storageClientOptions', {
     persistStorage: false, // This will use memory storage
 });
 
+// We will bind an HTTP response that we want to send to the Request.uniqueKey
+const requestsToResponses = new Map();
+
+// Initialize the crawler
+const crawler = new PlaywrightCrawler({
+    keepAlive: true,
+    launchContext: {
+        launchOptions: {
+            headless: true,
+            args: [
+                '--disk-cache-dir=/tmp',  // Use the RAM-mounted /tmp
+                '--disk-cache-size=0',    // Disable disk cache (optional)
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+            ],
+        },
+    },
+    maxConcurrency: parseInt(process.env.maxConcurrency) || 3,
+    requestHandler: async (context) => {
+        context.requestsToResponses = requestsToResponses
+        return requestHandler(context);
+    },
+    failedRequestHandler: async ({ request }) => {
+        log.error(`Request ${request.url} failed:`, request.errorMessages);
+        const httpResponse = requestsToResponses.get(request.uniqueKey);
+        httpResponse.status(500).json({
+            success: false,
+            message: 'Crawler failed. Check the server logs for details.',
+            error: request.errorMessages,
+        });
+        requestsToResponses.delete(request.uniqueKey);
+    },
+});
+
 // Initialize the Express app
 const app = express();
 const port = process.env.PORT || 3001;
@@ -18,65 +53,21 @@ const port = process.env.PORT || 3001;
 // Define the /start-crawl endpoint
 app.get('/start-crawl', async (req, res) => {
     const urlToCrawl = req.query.url;
-    const maxResults = req.query.maxResults ? parseInt(req.query.maxResults) : null;
 
     if (!urlToCrawl) {
         return res.status(400).send('Please provide a URL to crawl using the "url" query parameter.');
     }
-
-    if (maxResults !== null && (isNaN(maxResults) || maxResults <= 0)) {
-        return res.status(400).send('maxResults must be a positive integer if provided.');
-    }
-
-    console.log(`Starting crawl for URL: ${urlToCrawl}`);
-
-    // Clear previous metrics
-    clearMetrics();
-
-    // Initialize the crawler
-    const crawler = new PlaywrightCrawler({
-        launchContext: {
-            launchOptions: {
-                headless: true,
-                args: [
-                    '--disk-cache-dir=/tmp',  // Use the RAM-mounted /tmp
-                    '--disk-cache-size=0',    // Disable disk cache (optional)
-                    '--disable-dev-shm-usage',
-                    '--no-sandbox',
-                ],
-            },
-        },
-        maxConcurrency: parseInt(process.env.maxConcurrency) || 3,
-        requestHandler: async (context) => {
-            // Pass maxResults to the request handler
-            context.maxResults = maxResults;
-            return requestHandler(context);
-        },
-    });
+    log.info(`Starting crawl for URL: ${urlToCrawl}`);
 
     try {
-        console.log('Starting the crawler...');
-        await crawler.run([urlToCrawl]);
-        console.log('Crawler finished successfully.');
+        log.info('Starting the crawler...');
+        const crawleeRequest = { url: urlToCrawl, uniqueKey: randomUUID() };
+        requestsToResponses.set(crawleeRequest.uniqueKey, res);
+        await crawler.addRequests([crawleeRequest]);
+        log.info('Crawler finished successfully.');
 
-        // Flush any remaining articles in the batch
-        await flushBatch();
-
-        // Get the metrics
-        const metrics = getMetrics();
-
-        // Send the metrics as JSON response
-        res.json({
-            success: true,
-            message: 'Crawl completed successfully.',
-            metrics,
-        });
     } catch (error) {
-        console.error('Crawler failed:', error);
-        
-        // Flush any remaining articles in the batch even on failure
-        await flushBatch();
-        
+        log.error('Crawler failed:', error);
         res.status(500).json({
             success: false,
             message: 'Crawler failed. Check the server logs for details.',
@@ -86,6 +77,7 @@ app.get('/start-crawl', async (req, res) => {
 });
 
 // Start the server
-app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+    log.info(`Server running at http://0.0.0.0:${port}`);
 });
+await crawler.run();
