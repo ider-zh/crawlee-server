@@ -1,5 +1,3 @@
-import process from 'process';
-
 let totalPagesScraped = 0;
 let totalFailures = 0;
 let startTime = null;
@@ -22,7 +20,11 @@ export const requestHandler = async ({ request, page, requestsToResponses }) => 
 
     try {
         await page.waitForLoadState('networkidle', { timeout: 15000 }); // Added 15 second timeout
+    } catch (error) {
+        log.warning(`Timeout waiting for page to load: ${request.url}`);
+    }
 
+    try {
         const title = await page.title();
         log.info(`Title: ${title}`);
 
