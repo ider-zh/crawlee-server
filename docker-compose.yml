@@ -1,5 +1,6 @@
 services:
   scraper:
+    init: true
     tmpfs:
      - /tmp:size=1G,mode=1777  # 1GB RAM disk, full permissions
     build: .
